@@ -1,0 +1,15 @@
+[package]
+name = "omni-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Text primitives: rope, selection, transaction, undo history"
+
+[lints]
+workspace = true
+
+[dependencies]
+ropey.workspace = true
+smallvec.workspace = true
+tracing.workspace = true

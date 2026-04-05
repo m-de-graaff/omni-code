@@ -1,0 +1,18 @@
+[package]
+name = "omni-vcs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Git integration via gitoxide"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-event.workspace = true
+gix.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+thiserror.workspace = true
+tracing.workspace = true

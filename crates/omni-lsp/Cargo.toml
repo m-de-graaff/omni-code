@@ -1,0 +1,20 @@
+[package]
+name = "omni-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LSP client implementation"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-event.workspace = true
+lsp-types.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "rt"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

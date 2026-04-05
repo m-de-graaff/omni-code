@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Claude Code
+.claude/
+
+# Environment
+.env
+.env.local

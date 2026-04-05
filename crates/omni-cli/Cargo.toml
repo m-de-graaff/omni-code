@@ -1,0 +1,32 @@
+[package]
+name = "omni-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Binary entry point for Omni Code IDE"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "omni"
+path = "src/main.rs"
+
+[dependencies]
+omni-core.workspace = true
+omni-event.workspace = true
+omni-syntax.workspace = true
+omni-view.workspace = true
+omni-lsp.workspace = true
+omni-ai.workspace = true
+omni-term.workspace = true
+omni-vcs.workspace = true
+omni-loader.workspace = true
+ratatui.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["full"] }
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true

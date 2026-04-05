@@ -1,0 +1,22 @@
+[package]
+name = "omni-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Terminal UI: ratatui components, event loop, compositor"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-view.workspace = true
+omni-event.workspace = true
+omni-syntax.workspace = true
+omni-loader.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio = { workspace = true, features = ["full"] }
+color-eyre.workspace = true
+tracing.workspace = true

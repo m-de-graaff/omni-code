@@ -1,0 +1,15 @@
+[package]
+name = "omni-event"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Event system, hooks, and async action dispatching"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing.workspace = true

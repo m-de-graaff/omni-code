@@ -1,0 +1,17 @@
+[package]
+name = "omni-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Editor state: Document, View, ViewTree (frontend-agnostic)"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-event.workspace = true
+slotmap.workspace = true
+bitflags.workspace = true
+tracing.workspace = true

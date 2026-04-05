@@ -1,0 +1,22 @@
+[package]
+name = "omni-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AI provider abstraction layer + provider implementations"
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-core.workspace = true
+omni-event.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
