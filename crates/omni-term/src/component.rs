@@ -18,7 +18,7 @@ pub enum EventResult {
     ///
     /// This is useful for pushing/popping layers (e.g., opening a popup)
     /// without the component needing a reference to the compositor.
-    Callback(Box<dyn FnOnce(&mut crate::Compositor) + Send>),
+    Callback(crate::context::Callback),
 }
 
 /// Cursor shape variants for the terminal cursor.
@@ -78,6 +78,14 @@ pub trait Component: Send {
         _area: Rect,
         _ctx: &mut Context,
     ) -> color_eyre::Result<EventResult> {
+        Ok(EventResult::Ignored)
+    }
+
+    /// Handle a paste event (from bracketed paste mode).
+    ///
+    /// # Errors
+    /// Returns an error if event handling fails.
+    fn handle_paste(&mut self, _text: &str, _ctx: &mut Context) -> color_eyre::Result<EventResult> {
         Ok(EventResult::Ignored)
     }
 

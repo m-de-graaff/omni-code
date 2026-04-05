@@ -18,7 +18,8 @@ struct Args {
     log_level: String,
 }
 
-fn main() -> color_eyre::Result<()> {
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     let args = Args::parse();
@@ -39,7 +40,12 @@ fn main() -> color_eyre::Result<()> {
     tracing::info!("Omni Code starting...");
 
     // Initialize the event bus
-    let _bus = omni_event::EventBus::new(256);
+    let bus = omni_event::EventBus::new(256);
+    let mut action_rx = bus.subscribe();
+    let action_tx = bus.sender();
+
+    // Callback channel for compositor mutations
+    let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Load configuration
     let config = omni_loader::EditorConfig::default();
@@ -48,13 +54,21 @@ fn main() -> color_eyre::Result<()> {
     let mut view_tree = omni_view::ViewTree::new();
 
     // Build the application context
-    let mut ctx = omni_term::Context::new(&mut view_tree, &config);
+    let mut ctx = omni_term::Context::new(&mut view_tree, &config, action_tx, callback_tx);
 
     // Set up the terminal and run
     let mut terminal = ratatui::init();
     let mut compositor = omni_term::Compositor::new();
+    compositor.push(Box::new(omni_term::EditorShell::new()))?;
 
-    let result = omni_term::event_loop::run(&mut terminal, &mut compositor, &mut ctx);
+    let result = omni_term::event_loop::run(
+        &mut terminal,
+        &mut compositor,
+        &mut ctx,
+        &mut action_rx,
+        &mut callback_rx,
+    )
+    .await;
 
     ratatui::restore();
 

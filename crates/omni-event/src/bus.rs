@@ -28,6 +28,15 @@ impl EventBus {
         self.sender.send(action).unwrap_or(0)
     }
 
+    /// Get a clone of the underlying sender for direct publishing.
+    ///
+    /// Useful for passing into components or background tasks that need
+    /// to publish actions without holding the entire `EventBus`.
+    #[must_use]
+    pub fn sender(&self) -> broadcast::Sender<Action> {
+        self.sender.clone()
+    }
+
     /// Subscribe to events. Returns a receiver handle.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Action> {

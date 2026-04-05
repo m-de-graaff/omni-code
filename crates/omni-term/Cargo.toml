@@ -19,4 +19,5 @@ ratatui.workspace = true
 crossterm.workspace = true
 tokio = { workspace = true, features = ["full"] }
 color-eyre.workspace = true
+futures-util.workspace = true
 tracing.workspace = true

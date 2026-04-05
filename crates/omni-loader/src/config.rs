@@ -16,6 +16,8 @@ pub struct EditorConfig {
     pub word_wrap: bool,
     /// Theme name.
     pub theme: String,
+    /// Tick rate in milliseconds for periodic UI refresh (animations, spinners).
+    pub tick_rate_ms: u64,
 }
 
 impl Default for EditorConfig {
@@ -26,6 +28,7 @@ impl Default for EditorConfig {
             line_numbers: true,
             word_wrap: false,
             theme: "default".to_string(),
+            tick_rate_ms: 100,
         }
     }
 }

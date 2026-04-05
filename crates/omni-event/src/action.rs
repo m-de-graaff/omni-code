@@ -38,6 +38,15 @@ pub enum Action {
     /// Split the view horizontally.
     HorizontalSplit,
 
+    /// Toggle the sidebar visibility.
+    ToggleSidebar,
+
+    /// Toggle the bottom panel visibility.
+    ToggleBottomPanel,
+
+    /// Toggle the minimap visibility.
+    ToggleMinimap,
+
     /// Show the command palette.
     CommandPalette,
 

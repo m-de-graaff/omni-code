@@ -18,19 +18,31 @@ use crate::context::Context;
 pub struct Compositor {
     layers: Vec<Box<dyn Component>>,
     area: Rect,
+    needs_redraw: bool,
 }
 
 impl Compositor {
     /// Create an empty compositor.
     #[must_use]
     pub fn new() -> Self {
-        Self { layers: Vec::new(), area: Rect::default() }
+        Self { layers: Vec::new(), area: Rect::default(), needs_redraw: true }
     }
 
     /// The current terminal area.
     #[must_use]
     pub const fn area(&self) -> Rect {
         self.area
+    }
+
+    /// Whether the compositor needs to be redrawn.
+    #[must_use]
+    pub const fn needs_redraw(&self) -> bool {
+        self.needs_redraw
+    }
+
+    /// Reset the redraw flag after rendering.
+    pub const fn mark_redrawn(&mut self) {
+        self.needs_redraw = false;
     }
 
     /// Push a component layer on top and initialize it.
@@ -40,12 +52,17 @@ impl Compositor {
     pub fn push(&mut self, mut component: Box<dyn Component>) -> color_eyre::Result<()> {
         component.init(self.area)?;
         self.layers.push(component);
+        self.needs_redraw = true;
         Ok(())
     }
 
     /// Pop the topmost layer.
     pub fn pop(&mut self) -> Option<Box<dyn Component>> {
-        self.layers.pop()
+        let layer = self.layers.pop();
+        if layer.is_some() {
+            self.needs_redraw = true;
+        }
+        layer
     }
 
     /// Number of layers.
@@ -69,6 +86,7 @@ impl Compositor {
         for layer in &mut self.layers {
             layer.init(area)?;
         }
+        self.needs_redraw = true;
         Ok(())
     }
 
@@ -84,16 +102,23 @@ impl Compositor {
         event: &Event,
         ctx: &mut Context,
     ) -> color_eyre::Result<EventResult> {
-        match event {
-            Event::Key(key_event) => self.handle_key(*key_event, ctx),
-            Event::Mouse(mouse_event) => self.handle_mouse(*mouse_event, ctx),
+        let result = match event {
+            Event::Key(key_event) => self.handle_key(*key_event, ctx)?,
+            Event::Mouse(mouse_event) => self.handle_mouse(*mouse_event, ctx)?,
+            Event::Paste(text) => self.handle_paste(text, ctx)?,
             Event::Resize(w, h) => {
                 let area = Rect::new(0, 0, *w, *h);
                 self.resize(area)?;
-                Ok(EventResult::Consumed)
+                EventResult::Consumed
             }
-            _ => Ok(EventResult::Ignored),
+            _ => EventResult::Ignored,
+        };
+
+        if !matches!(result, EventResult::Ignored) {
+            self.needs_redraw = true;
         }
+
+        Ok(result)
     }
 
     /// Render all layers back-to-front, then set cursor from the topmost
@@ -138,6 +163,17 @@ impl Compositor {
         let area = self.area;
         for layer in self.layers.iter_mut().rev() {
             let result = layer.handle_mouse(mouse, area, ctx)?;
+            if !matches!(result, EventResult::Ignored) {
+                return Ok(result);
+            }
+        }
+        Ok(EventResult::Ignored)
+    }
+
+    /// Dispatch a paste event front-to-back.
+    fn handle_paste(&mut self, text: &str, ctx: &mut Context) -> color_eyre::Result<EventResult> {
+        for layer in self.layers.iter_mut().rev() {
+            let result = layer.handle_paste(text, ctx)?;
             if !matches!(result, EventResult::Ignored) {
                 return Ok(result);
             }
