@@ -21,6 +21,16 @@ pub struct SearchBar {
     pub case_sensitive: bool,
     /// Whether the search bar is active/visible.
     pub active: bool,
+    /// Whether regex search mode is active.
+    pub regex_mode: bool,
+    /// Whether replace mode is active.
+    pub replace_mode: bool,
+    /// The replacement text.
+    pub replace_text: String,
+    /// Whether the replace input is focused (vs search input).
+    replace_focused: bool,
+    /// Regex compilation error message (when regex_mode is on and pattern is invalid).
+    pub regex_error: Option<String>,
     /// Document version when matches were last computed (for cache invalidation).
     doc_version: u64,
 }
@@ -35,6 +45,11 @@ impl SearchBar {
             current_match: 0,
             case_sensitive: false,
             active: false,
+            regex_mode: false,
+            replace_mode: false,
+            replace_text: String::new(),
+            replace_focused: false,
+            regex_error: None,
             doc_version: u64::MAX,
         }
     }
@@ -48,8 +63,12 @@ impl SearchBar {
     /// Deactivate and reset.
     pub fn deactivate(&mut self) {
         self.active = false;
+        self.regex_mode = false;
+        self.replace_mode = false;
+        self.replace_focused = false;
         self.matches.clear();
         self.query.clear();
+        self.replace_text.clear();
     }
 
     /// Update matches if the query or document changed.
@@ -63,7 +82,18 @@ impl SearchBar {
         if doc_version == self.doc_version && !self.matches.is_empty() {
             return; // cached
         }
-        self.matches = text.find_all(&self.query, self.case_sensitive);
+        self.regex_error = None;
+        self.matches = if self.regex_mode {
+            match text.find_all_regex(&self.query, self.case_sensitive) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.regex_error = Some(e.to_string());
+                    Vec::new()
+                }
+            }
+        } else {
+            text.find_all(&self.query, self.case_sensitive)
+        };
         if self.current_match >= self.matches.len() {
             self.current_match = 0;
         }
@@ -100,39 +130,58 @@ impl SearchBar {
         self.matches.get(self.current_match).map(|&(start, _)| start)
     }
 
-    /// Handle a key event. Returns `true` if consumed.
-    pub fn handle_key(&mut self, event: KeyEvent) -> bool {
+    /// Handle a key event. Returns action to take.
+    pub fn handle_key(&mut self, event: KeyEvent) -> SearchBarAction {
         match event.code {
             KeyCode::Esc => {
                 self.deactivate();
-                true
+                SearchBarAction::Consumed
+            }
+            KeyCode::Tab if self.replace_mode => {
+                self.replace_focused = !self.replace_focused;
+                SearchBarAction::Consumed
             }
             KeyCode::Enter => {
-                if event.modifiers.contains(KeyModifiers::SHIFT) {
+                if self.replace_focused {
+                    // In replace field: Enter = replace current match
+                    if event.modifiers.contains(KeyModifiers::CONTROL) {
+                        SearchBarAction::ReplaceAll
+                    } else {
+                        SearchBarAction::ReplaceOne
+                    }
+                } else if event.modifiers.contains(KeyModifiers::SHIFT) {
                     self.prev_match();
+                    SearchBarAction::Consumed
                 } else {
                     self.next_match();
+                    SearchBarAction::Consumed
                 }
-                true
             }
             KeyCode::Backspace => {
-                self.query.pop();
-                true
+                if self.replace_focused {
+                    self.replace_text.pop();
+                } else {
+                    self.query.pop();
+                }
+                SearchBarAction::Consumed
             }
             KeyCode::Char(c) => {
-                if event.modifiers.contains(KeyModifiers::ALT)
-                    && (c == 'c' || c == 'C')
-                {
-                    // Alt+C toggles case sensitivity
+                if event.modifiers.contains(KeyModifiers::ALT) && (c == 'r' || c == 'R') {
+                    self.regex_mode = !self.regex_mode;
+                } else if event.modifiers.contains(KeyModifiers::ALT) && (c == 'c' || c == 'C') {
                     self.case_sensitive = !self.case_sensitive;
                 } else if !event.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.query.push(c);
+                    if self.replace_focused {
+                        self.replace_text.push(c);
+                    } else {
+                        self.query.push(c);
+                    }
                 } else {
-                    return false;
+                    return SearchBarAction::Ignored;
                 }
-                true
+                SearchBarAction::Consumed
             }
-            _ => false,
+            _ => SearchBarAction::Ignored,
         }
     }
 
@@ -155,7 +204,10 @@ impl SearchBar {
 
         // Search input line
         let case_indicator = if self.case_sensitive { "[Aa]" } else { "[aa]" };
-        let match_info = if self.matches.is_empty() {
+        let regex_indicator = if self.regex_mode { "[.*]" } else { "[  ]" };
+        let match_info = if let Some(ref err) = self.regex_error {
+            format!("Regex error: {}", err.chars().take(30).collect::<String>())
+        } else if self.matches.is_empty() {
             if self.query.is_empty() {
                 String::new()
             } else {
@@ -173,11 +225,66 @@ impl SearchBar {
             Span::styled(case_indicator, Style::new().fg(if self.case_sensitive { theme.text_accent } else { theme.text_muted })),
         ]);
 
+        let search_style = if !self.replace_focused {
+            Style::new().fg(theme.foreground).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.foreground)
+        };
+        let search_cursor = if !self.replace_focused {
+            Span::styled("\u{2588}", Style::new().fg(theme.cursor))
+        } else {
+            Span::raw("")
+        };
+
+        let line = Line::from(vec![
+            Span::styled(" \u{f002} ", Style::new().fg(theme.text_accent)),
+            Span::styled(&self.query, search_style),
+            search_cursor,
+            Span::styled(format!("  {match_info}  "), Style::new().fg(theme.text_muted)),
+            Span::styled(case_indicator, Style::new().fg(if self.case_sensitive { theme.text_accent } else { theme.text_muted })),
+            Span::styled(" ", Style::new()),
+            Span::styled(regex_indicator, Style::new().fg(if self.regex_mode { theme.text_accent } else { theme.text_muted })),
+        ]);
+
         frame.render_widget(
             Paragraph::new(line),
             Rect::new(area.x, area.y, area.width, 1),
         );
+
+        // Replace row (if in replace mode)
+        if self.replace_mode && area.height > 1 {
+            let replace_style = if self.replace_focused {
+                Style::new().fg(theme.foreground).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme.foreground)
+            };
+            let replace_cursor = if self.replace_focused {
+                Span::styled("\u{2588}", Style::new().fg(theme.cursor))
+            } else {
+                Span::raw("")
+            };
+
+            let replace_line = Line::from(vec![
+                Span::styled(" \u{f061} ", Style::new().fg(theme.text_accent)), // arrow right
+                Span::styled(&self.replace_text, replace_style),
+                replace_cursor,
+                Span::styled("  Enter:replace  Ctrl+Enter:all", Style::new().fg(theme.text_muted)),
+            ]);
+            frame.render_widget(
+                Paragraph::new(replace_line),
+                Rect::new(area.x, area.y + 1, area.width, 1),
+            );
+        }
     }
+}
+
+/// Actions emitted by the search bar key handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchBarAction {
+    Consumed,
+    Ignored,
+    ReplaceOne,
+    ReplaceAll,
 }
 
 impl Default for SearchBar {

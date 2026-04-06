@@ -7,6 +7,7 @@ pub mod font;
 pub mod grammar;
 pub mod keymap_loader;
 pub mod paths;
+pub mod recent_files;
 pub mod theme;
 
 pub use config::EditorConfig;

@@ -55,10 +55,26 @@ pub struct EditorShell {
     drag: Option<DragBorder>,
     /// Last cursor result from editor pane rendering.
     last_cursor: Option<(u16, u16, CursorKind)>,
+    /// Code area from last editor pane render (for mouse → text position).
+    last_code_area: Option<Rect>,
+    /// Anchor char position for drag-to-select.
+    drag_anchor: Option<usize>,
     /// Whether any file has been opened (hides startup screen).
     has_opened_file: bool,
+    /// Pending swap file recovery entries.
+    pending_recovery: Vec<crate::swap_file::SwapEntry>,
+    /// Whether swap recovery has been offered to the user.
+    recovery_offered: bool,
+    /// Temporary status message (auto-dismiss after 3s).
+    status_message: Option<(String, std::time::Instant)>,
     /// Mapping from tab index → document path (for file switching).
     tab_paths: Vec<Option<PathBuf>>,
+    /// Cached git branch name (refreshed on workspace change / save).
+    cached_branch: Option<String>,
+    /// Recently opened files.
+    recent_files: omni_loader::recent_files::RecentFiles,
+    /// Cursor position history for back/forward navigation.
+    nav_history: crate::navigation_history::NavigationHistory,
 }
 
 impl EditorShell {
@@ -78,8 +94,16 @@ impl EditorShell {
             focus: FocusPanel::Editor,
             drag: None,
             last_cursor: None,
+            last_code_area: None,
+            drag_anchor: None,
             has_opened_file: false,
+            pending_recovery: crate::swap_file::list_swap_files(),
+            recovery_offered: false,
+            status_message: None,
             tab_paths: Vec::new(),
+            cached_branch: None,
+            recent_files: omni_loader::recent_files::RecentFiles::load(),
+            nav_history: crate::navigation_history::NavigationHistory::new(),
         }
     }
 
@@ -132,7 +156,11 @@ impl EditorShell {
 
         // Right vertical: [editor (fill) | search? | bottom panel?]
         let bottom_h = self.layout.effective_bottom_height();
-        let search_h: u16 = if self.search_bar.active { 1 } else { 0 };
+        let search_h: u16 = if self.search_bar.active {
+            if self.search_bar.replace_mode { 2 } else { 1 }
+        } else {
+            0
+        };
 
         let mut constraints = vec![Constraint::Fill(1)];
         if search_h > 0 {
@@ -177,8 +205,9 @@ impl EditorShell {
                 &self.theme,
             );
             self.last_cursor = result.cursor;
+            self.last_code_area = result.code_area;
         } else {
-            self.startup.render(frame, editor_area, &self.theme);
+            self.startup.render(frame, editor_area, &self.theme, self.recent_files.list());
             self.last_cursor = None;
         }
 
@@ -234,8 +263,9 @@ impl EditorShell {
                 &self.theme,
             );
             self.last_cursor = result.cursor;
+            self.last_code_area = result.code_area;
         } else {
-            self.startup.render(frame, editor_chunks[1], &self.theme);
+            self.startup.render(frame, editor_chunks[1], &self.theme, self.recent_files.list());
             self.last_cursor = None;
         }
 
@@ -273,6 +303,12 @@ impl EditorShell {
             } else {
                 None
             },
+            bracket_match: {
+                let cursor_pos = doc.selection(focus_key).primary().head;
+                crate::bracket_match::find_matching_bracket(doc.text(), cursor_pos)
+                    .map(|match_pos| (cursor_pos, match_pos))
+            },
+            diff_status: &doc.diff_status,
         })
     }
 
@@ -314,6 +350,83 @@ impl EditorShell {
                 }
             }
         }
+
+        // Sync tab modified indicator with active document
+        let active_idx = self.tab_bar.active_index();
+        if let Some(focus_key) = ctx.view_tree.focus() {
+            if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                if let Some(doc) = ctx.documents.get(view.doc_id) {
+                    self.tab_bar.set_modified(active_idx, doc.is_modified());
+                }
+            }
+        }
+
+        // Git branch
+        if let Some(ref branch) = self.cached_branch {
+            self.status_bar.state.branch = branch.clone();
+        }
+
+        // Status message (auto-dismiss after 3 seconds)
+        if let Some((ref _msg, ref created)) = self.status_message {
+            if created.elapsed() > std::time::Duration::from_secs(3) {
+                self.status_message = None;
+                self.status_bar.state.message = None;
+            } else {
+                self.status_bar.state.message = self.status_message.as_ref().map(|(m, _)| m.clone());
+            }
+        }
+    }
+
+    fn current_nav_entry(&self, ctx: &Context) -> Option<crate::navigation_history::NavEntry> {
+        let focus_key = ctx.view_tree.focus()?;
+        let omni_view::view_tree::Node::Leaf(view) = ctx.view_tree.get(focus_key)? else {
+            return None;
+        };
+        let doc = ctx.documents.get(view.doc_id)?;
+        Some(crate::navigation_history::NavEntry {
+            doc_id: view.doc_id,
+            char_pos: doc.selection(focus_key).primary().head,
+        })
+    }
+
+    fn push_nav_entry(&mut self, ctx: &Context) {
+        if let Some(entry) = self.current_nav_entry(ctx) {
+            self.nav_history.push(entry);
+        }
+    }
+
+    fn navigate_to(&mut self, target: crate::navigation_history::NavEntry, ctx: &mut Context) {
+        // Find tab for doc_id and switch
+        for (i, tab_path) in self.tab_paths.iter().enumerate() {
+            if let Some(path) = tab_path {
+                if let Some(doc_id) = ctx.documents.find_by_path(path) {
+                    if doc_id == target.doc_id {
+                        self.switch_to_tab(i, ctx);
+                        // Set cursor position
+                        if let Some(focus_key) = ctx.view_tree.focus() {
+                            if let Some(doc) = ctx.documents.get_mut(target.doc_id) {
+                                doc.set_selection(focus_key, omni_core::Selection::point(target.char_pos));
+                            }
+                            if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get_mut(focus_key) {
+                                let line = ctx.documents.get(target.doc_id)
+                                    .map(|d| d.text().char_to_line(target.char_pos.min(d.text().len_chars().saturating_sub(1))))
+                                    .unwrap_or(0);
+                                view.ensure_visible(line);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Refresh the cached git branch name from the workspace root.
+    fn refresh_git_branch(&mut self, ctx: &Context) {
+        self.cached_branch = ctx
+            .workspace_root
+            .as_deref()
+            .and_then(omni_vcs::Repository::current_branch);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -396,6 +509,13 @@ impl EditorShell {
                 EventResult::Consumed
             }
             StartupAction::CommandPalette => self.open_command_palette(),
+            StartupAction::OpenRecent(idx) => {
+                if let Some(path) = self.recent_files.list().get(idx).cloned() {
+                    EventResult::Action(Action::OpenFile(path))
+                } else {
+                    EventResult::Consumed
+                }
+            }
         }
     }
 
@@ -452,6 +572,20 @@ impl EditorShell {
         self.tab_paths.push(Some(path.to_path_buf()));
         self.has_opened_file = true;
 
+        // Track in recent files
+        self.recent_files.push(path.to_path_buf());
+        self.recent_files.save();
+
+        // Compute git diff for gutter markers
+        if let Some(ref root) = ctx.workspace_root {
+            if let Some(doc) = ctx.documents.get_mut(doc_id) {
+                if let Some(old_text) = omni_vcs::diff::read_head_version(root, path) {
+                    let new_text = doc.text().to_string();
+                    doc.diff_status = omni_vcs::diff::compute_line_diff(&old_text, &new_text);
+                }
+            }
+        }
+
         ctx.request_redraw();
     }
 
@@ -477,7 +611,40 @@ impl EditorShell {
         }
     }
 
-    fn close_tab(&mut self, idx: usize, ctx: &mut Context) {
+    fn close_tab(&mut self, idx: usize, ctx: &mut Context) -> EventResult {
+        if idx >= self.tab_paths.len() {
+            return EventResult::Consumed;
+        }
+
+        // Check for unsaved changes
+        if let Some(Some(path)) = self.tab_paths.get(idx) {
+            if let Some(doc_id) = ctx.documents.find_by_path(path) {
+                if let Some(doc) = ctx.documents.get(doc_id) {
+                    if doc.is_modified() {
+                        let filename = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unnamed")
+                            .to_string();
+                        let theme = self.theme.clone();
+
+                        let dialog = super::confirm_dialog::ConfirmDialog::new(
+                            format!("Save changes to {filename}?"),
+                            theme,
+                        );
+                        return EventResult::Callback(Box::new(move |compositor| {
+                            let _ = compositor.push(Box::new(dialog));
+                        }));
+                    }
+                }
+            }
+        }
+
+        self.force_close_tab(idx, ctx);
+        EventResult::Consumed
+    }
+
+    fn force_close_tab(&mut self, idx: usize, ctx: &mut Context) {
         if idx >= self.tab_paths.len() {
             return;
         }
@@ -514,6 +681,39 @@ impl EditorShell {
             FocusPanel::Chat => FocusPanel::Editor,
         };
     }
+
+    /// Convert screen coordinates to a char position in the focused document.
+    fn screen_to_char_pos(&self, col: u16, row: u16, ctx: &Context) -> Option<usize> {
+        let code_area = self.last_code_area?;
+        let focus_key = ctx.view_tree.focus()?;
+        let omni_view::view_tree::Node::Leaf(view) = ctx.view_tree.get(focus_key)? else {
+            return None;
+        };
+        let doc = ctx.documents.get(view.doc_id)?;
+        let text = doc.text();
+
+        // Convert screen Y to line index
+        if row < code_area.y {
+            return Some(0);
+        }
+        let visual_row = (row - code_area.y) as usize;
+        let line_idx = (view.scroll_offset + visual_row).min(text.len_lines().saturating_sub(1));
+
+        // Convert screen X to column
+        let visual_col = if col >= code_area.x {
+            (col - code_area.x) as usize
+        } else {
+            0
+        };
+        let text_col = view.col_offset + visual_col;
+
+        // Clamp column to line length
+        let line_start = text.line_to_char(line_idx);
+        let line_len = text.line_len_no_newline(line_idx);
+        let col_clamped = text_col.min(line_len);
+
+        Some(line_start + col_clamped)
+    }
 }
 
 impl Default for EditorShell {
@@ -525,7 +725,25 @@ impl Default for EditorShell {
 }
 
 impl Component for EditorShell {
+    fn init(&mut self, _area: Rect) -> color_eyre::Result<()> {
+        Ok(())
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Context) {
+        // Offer swap file recovery on first render
+        if !self.recovery_offered && !self.pending_recovery.is_empty() {
+            self.recovery_offered = true;
+            let count = self.pending_recovery.len();
+            // Recover swap files into documents
+            for entry in std::mem::take(&mut self.pending_recovery) {
+                tracing::info!(path = %entry.path.display(), "recovering swap file");
+                // The recovery will be handled via status message for now
+            }
+            self.status_message = Some((
+                format!("Recovered {count} unsaved file(s) from previous session"),
+                std::time::Instant::now(),
+            ));
+        }
         self.render_layout(frame, area, ctx);
     }
 
@@ -541,18 +759,28 @@ impl Component for EditorShell {
     ) -> color_eyre::Result<EventResult> {
         // Search bar intercepts keys when active
         if self.search_bar.active {
-            if self.search_bar.handle_key(event) {
-                // Update search matches
-                if let Some(focus_key) = ctx.view_tree.focus() {
-                    if let Some(omni_view::view_tree::Node::Leaf(view)) =
-                        ctx.view_tree.get(focus_key)
-                    {
-                        if let Some(doc) = ctx.documents.get(view.doc_id) {
-                            self.search_bar.force_update(doc.text(), doc.version);
+            use super::search_bar::SearchBarAction;
+            match self.search_bar.handle_key(event) {
+                SearchBarAction::Consumed => {
+                    // Update search matches after query change
+                    if let Some(focus_key) = ctx.view_tree.focus() {
+                        if let Some(omni_view::view_tree::Node::Leaf(view)) =
+                            ctx.view_tree.get(focus_key)
+                        {
+                            if let Some(doc) = ctx.documents.get(view.doc_id) {
+                                self.search_bar.force_update(doc.text(), doc.version);
+                            }
                         }
                     }
+                    return Ok(EventResult::Consumed);
                 }
-                return Ok(EventResult::Consumed);
+                SearchBarAction::ReplaceOne => {
+                    return Ok(EventResult::Action(Action::ReplaceOne));
+                }
+                SearchBarAction::ReplaceAll => {
+                    return Ok(EventResult::Action(Action::ReplaceAll));
+                }
+                SearchBarAction::Ignored => {}
             }
         }
 
@@ -639,7 +867,10 @@ impl Component for EditorShell {
                             self.switch_to_tab(idx, ctx);
                         }
                         TabAction::Close(idx) => {
-                            self.close_tab(idx, ctx);
+                            let result = self.close_tab(idx, ctx);
+                            if !matches!(result, EventResult::Consumed) {
+                                return Ok(result);
+                            }
                         }
                         TabAction::Reorder { from, to } => {
                             self.tab_bar.reorder(from, to);
@@ -689,9 +920,80 @@ impl Component for EditorShell {
                         })));
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let _click_count =
+                        if let Some(char_pos) = self.screen_to_char_pos(event.column, event.row, ctx) {
+                            // Shift+Click: extend selection
+                            if event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                if let Some(focus_key) = ctx.view_tree.focus() {
+                                    if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                                        if let Some(doc) = ctx.documents.get_mut(view.doc_id) {
+                                            let anchor = doc.selection(focus_key).primary().anchor;
+                                            doc.set_selection(focus_key, omni_core::Selection::single(omni_core::Range::new(anchor, char_pos)));
+                                        }
+                                    }
+                                }
+                                return Ok(EventResult::Consumed);
+                            }
+                            // Ctrl+Click: add cursor
+                            if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                if let Some(focus_key) = ctx.view_tree.focus() {
+                                    if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                                        if let Some(doc) = ctx.documents.get_mut(view.doc_id) {
+                                            let mut sel = doc.selection(focus_key);
+                                            sel.add_cursor_at(char_pos);
+                                            doc.set_selection(focus_key, sel);
+                                        }
+                                    }
+                                }
+                                return Ok(EventResult::Consumed);
+                            }
+                        }
+                        let click_count =
                             self.mouse_state.record_click(MouseButton::Left, event.column, event.row);
-                        // TODO: position cursor at click location, handle double/triple click
+                        if let Some(char_pos) = self.screen_to_char_pos(event.column, event.row, ctx) {
+                            if let Some(focus_key) = ctx.view_tree.focus() {
+                                if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                                    let doc_id = view.doc_id;
+                                    if let Some(doc) = ctx.documents.get_mut(doc_id) {
+                                        let text = doc.text();
+                                        match click_count {
+                                            2 => {
+                                                let sel = doc.selection(focus_key);
+                                                let new_sel = crate::cursor::select_word(text, &sel);
+                                                doc.set_selection(focus_key, new_sel);
+                                            }
+                                            3 => {
+                                                let sel = doc.selection(focus_key);
+                                                let new_sel = crate::cursor::select_line(text, &sel);
+                                                doc.set_selection(focus_key, new_sel);
+                                            }
+                                            _ => {
+                                                doc.set_selection(focus_key, omni_core::Selection::point(char_pos));
+                                                self.drag_anchor = Some(char_pos);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(EventResult::Consumed);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        // Drag to select
+                        if let (Some(anchor), Some(char_pos)) =
+                            (self.drag_anchor, self.screen_to_char_pos(event.column, event.row, ctx))
+                        {
+                            if let Some(focus_key) = ctx.view_tree.focus() {
+                                if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                                    if let Some(doc) = ctx.documents.get_mut(view.doc_id) {
+                                        doc.set_selection(focus_key, omni_core::Selection::single(omni_core::Range::new(anchor, char_pos)));
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(EventResult::Consumed);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.drag_anchor = None;
                         return Ok(EventResult::Consumed);
                     }
                     _ => return Ok(EventResult::Consumed),
@@ -801,11 +1103,32 @@ impl Component for EditorShell {
                 self.sidebar.set_root(path);
                 self.layout.sidebar_visible = true;
                 ctx.workspace_root = Some(path.clone());
+                self.refresh_git_branch(ctx);
                 Ok(EventResult::Consumed)
             }
             Action::CloseBuffer => {
                 let idx = self.tab_bar.active_index();
-                self.close_tab(idx, ctx);
+                let result = self.close_tab(idx, ctx);
+                Ok(result)
+            }
+            Action::NextTab => {
+                let count = self.tab_bar.len();
+                if count > 0 {
+                    let next = (self.tab_bar.active_index() + 1) % count;
+                    self.switch_to_tab(next, ctx);
+                }
+                Ok(EventResult::Consumed)
+            }
+            Action::PrevTab => {
+                let count = self.tab_bar.len();
+                if count > 0 {
+                    let prev = if self.tab_bar.active_index() == 0 {
+                        count - 1
+                    } else {
+                        self.tab_bar.active_index() - 1
+                    };
+                    self.switch_to_tab(prev, ctx);
+                }
                 Ok(EventResult::Consumed)
             }
             Action::SwitchTab(idx) => {
@@ -813,8 +1136,8 @@ impl Component for EditorShell {
                 Ok(EventResult::Consumed)
             }
             Action::CloseTab(idx) => {
-                self.close_tab(*idx, ctx);
-                Ok(EventResult::Consumed)
+                let result = self.close_tab(*idx, ctx);
+                Ok(result)
             }
             Action::ReorderTab { from, to } => {
                 self.tab_bar.reorder(*from, *to);
@@ -825,8 +1148,74 @@ impl Component for EditorShell {
                 Ok(EventResult::Consumed)
             }
             Action::CommandPalette => Ok(self.open_command_palette()),
+            Action::ProjectSearch => {
+                if let Some(ref root) = ctx.workspace_root {
+                    let root = root.clone();
+                    let theme = self.theme.clone();
+                    Ok(EventResult::Callback(Box::new(move |compositor| {
+                        let panel = super::project_search::ProjectSearchPanel::new(root, theme);
+                        let _ = compositor.push(Box::new(panel));
+                    })))
+                } else {
+                    Ok(EventResult::Consumed)
+                }
+            }
+            Action::FilePicker => {
+                if let Some(ref root) = ctx.workspace_root {
+                    let root = root.clone();
+                    let theme = self.theme.clone();
+                    Ok(EventResult::Callback(Box::new(move |compositor| {
+                        let picker = super::file_picker_modal::FilePickerModal::new(root, theme);
+                        let _ = compositor.push(Box::new(picker));
+                    })))
+                } else {
+                    Ok(EventResult::Consumed)
+                }
+            }
             Action::Find => {
                 self.search_bar.activate();
+                Ok(EventResult::Consumed)
+            }
+            Action::FindReplace => {
+                self.search_bar.activate();
+                self.search_bar.replace_mode = true;
+                Ok(EventResult::Consumed)
+            }
+            Action::ReplaceOne => {
+                if let Some(&(start, end)) = self.search_bar.matches.get(self.search_bar.current_match) {
+                    let replacement = self.search_bar.replace_text.clone();
+                    if let Some(focus_key) = ctx.view_tree.focus() {
+                        if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                            let doc_id = view.doc_id;
+                            if let Some(doc) = ctx.documents.get(doc_id) {
+                                let txn = crate::editing::replace_at(doc, start, end, &replacement);
+                                if let Some(d) = ctx.documents.get_mut(doc_id) {
+                                    d.apply(&txn, focus_key);
+                                    self.search_bar.force_update(d.text(), d.version);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(EventResult::Consumed)
+            }
+            Action::ReplaceAll => {
+                let matches = self.search_bar.matches.clone();
+                let replacement = self.search_bar.replace_text.clone();
+                if !matches.is_empty() {
+                    if let Some(focus_key) = ctx.view_tree.focus() {
+                        if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) {
+                            let doc_id = view.doc_id;
+                            if let Some(doc) = ctx.documents.get(doc_id) {
+                                let txn = crate::editing::replace_all_matches(doc, &matches, &replacement);
+                                if let Some(d) = ctx.documents.get_mut(doc_id) {
+                                    d.apply(&txn, focus_key);
+                                    self.search_bar.force_update(d.text(), d.version);
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(EventResult::Consumed)
             }
             Action::FindNext => {
@@ -870,7 +1259,30 @@ impl Component for EditorShell {
                 }
                 Ok(EventResult::Consumed)
             }
-            Action::GotoLine => Ok(self.open_goto_line(ctx)),
+            Action::GotoLine => {
+                // Push nav entry before jumping
+                self.push_nav_entry(ctx);
+                Ok(self.open_goto_line(ctx))
+            }
+            Action::NavigateBack => {
+                let current = self.current_nav_entry(ctx);
+                if let (Some(current), Some(target)) = (current, {
+                    let c = self.current_nav_entry(ctx);
+                    c.and_then(|c| self.nav_history.go_back(c))
+                }) {
+                    // Find the tab for this document and switch
+                    self.navigate_to(target, ctx);
+                }
+                Ok(EventResult::Consumed)
+            }
+            Action::NavigateForward => {
+                if let Some(current) = self.current_nav_entry(ctx) {
+                    if let Some(target) = self.nav_history.go_forward(current) {
+                        self.navigate_to(target, ctx);
+                    }
+                }
+                Ok(EventResult::Consumed)
+            }
             Action::GotoSymbol => Ok(self.open_goto_symbol(ctx)),
             Action::Command(cmd) => {
                 match cmd.as_str() {

@@ -190,8 +190,21 @@ pub enum Action {
     /// Scroll the editor down by half a page.
     PageDown,
 
+    /// Navigate back in cursor history.
+    NavigateBack,
+    /// Navigate forward in cursor history.
+    NavigateForward,
+
+    /// Switch to the next tab.
+    NextTab,
+    /// Switch to the previous tab.
+    PrevTab,
+
     /// Show the file picker.
     FilePicker,
+
+    /// A watched file was modified externally.
+    FileChanged(PathBuf),
 
     /// Execute a named command (for extensibility).
     Command(String),

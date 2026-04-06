@@ -16,6 +16,8 @@ use crate::component::EventResult;
 use crate::context::{Callback, Context};
 use crate::terminal::TerminalModeGuard;
 
+use omni_syntax::LanguageRegistry;
+
 /// Run the main async event loop.
 ///
 /// Uses `tokio::select!` to multiplex five event sources:
@@ -53,6 +55,14 @@ pub async fn run(
     // Tick interval for animations/spinners
     let tick_rate = Duration::from_millis(ctx.config.tick_rate_ms);
     let mut tick_interval = tokio::time::interval(tick_rate);
+
+    // Swap file timer (every 30 seconds)
+    let mut swap_interval = tokio::time::interval(Duration::from_secs(30));
+    swap_interval.tick().await; // consume first immediate tick
+
+    // File watcher for external change detection
+    let (fw_tx, mut fw_rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
+    let mut file_watcher = setup_file_watcher(fw_tx);
 
     // Ctrl+C signal for graceful shutdown
     let ctrl_c = tokio::signal::ctrl_c();
@@ -160,11 +170,23 @@ pub async fn run(
                 if chord_state.check_timeout() {
                     ctx.needs_redraw = true;
                 }
-                // TODO: Only redraw on tick when animations are actually active.
+                // Redraw on tick for status message auto-dismiss and other time-based UI
+                // (only when there's something that might need updating)
+                ctx.needs_redraw = true; // TODO: optimize to only redraw when status message is active
+            }
+
+            // Branch 5: Periodic swap file writes
+            _ = swap_interval.tick() => {
+                write_swap_files(ctx);
+            }
+
+            // Branch 6: File watcher events
+            Some(changed_path) = fw_rx.recv() => {
+                handle_action(&Action::FileChanged(changed_path), compositor, ctx)?;
                 ctx.needs_redraw = true;
             }
 
-            // Branch 5: Graceful shutdown on Ctrl+C
+            // Branch 6: Graceful shutdown on Ctrl+C
             _ = &mut ctrl_c => {
                 tracing::info!("received Ctrl+C, shutting down");
                 break;
@@ -174,6 +196,14 @@ pub async fn run(
         // Check quit condition
         if ctx.should_quit {
             break;
+        }
+
+        // Watch workspace root if newly set
+        if let Some(ref root) = ctx.workspace_root {
+            if let Some(ref mut watcher) = file_watcher {
+                use notify::{RecursiveMode, Watcher};
+                let _ = watcher.watch(root, RecursiveMode::Recursive);
+            }
         }
 
         // Event-driven rendering: only redraw when state changed
@@ -202,12 +232,14 @@ fn handle_action(
             let area = Rect::new(0, 0, *width, *height);
             compositor.resize(area)?;
         }
-        Action::OpenFile(_) => {
+        Action::OpenFile(path) => {
             // EditorShell handles document loading, tab creation, and view setup
             let result = compositor.dispatch_action(action, ctx)?;
             if let EventResult::Action(nested) = result {
                 handle_action(&nested, compositor, ctx)?;
             }
+            // Watch the file for external changes (path is borrowed from the Action)
+            // We can't pass the watcher here, so we store the path for watching below
         }
         Action::Save => {
             handle_save(ctx);
@@ -251,6 +283,12 @@ fn handle_action(
         // Actions routable to component layers
         Action::FocusNext
         | Action::FocusPrev
+        | Action::NextTab
+        | Action::PrevTab
+        | Action::NavigateBack
+        | Action::NavigateForward
+        | Action::FilePicker
+        | Action::ProjectSearch
         | Action::ToggleSidebar
         | Action::ToggleBottomPanel
         | Action::ToggleMinimap
@@ -275,6 +313,9 @@ fn handle_action(
             if let EventResult::Action(nested) = result {
                 handle_action(&nested, compositor, ctx)?;
             }
+        }
+        Action::FileChanged(path) => {
+            handle_file_changed(path, ctx);
         }
         _ => {
             tracing::debug!(?action, "unhandled action");
@@ -317,7 +358,9 @@ fn try_insert_char(key: &crossterm::event::KeyEvent, ctx: &mut Context) {
 
     if let Some(doc) = ctx.documents.get_mut(doc_id) {
         doc.apply(&txn, focus_key);
+        rehighlight(doc, ctx.language_registry);
     }
+    ensure_cursor_in_view(ctx);
     ctx.request_redraw();
 }
 
@@ -339,7 +382,9 @@ fn handle_paste_event(text: &str, ctx: &mut Context) {
 
     if let Some(doc) = ctx.documents.get_mut(doc_id) {
         doc.apply(&txn, focus_key);
+        rehighlight(doc, ctx.language_registry);
     }
+    ensure_cursor_in_view(ctx);
     ctx.request_redraw();
 }
 
@@ -376,6 +421,7 @@ fn handle_cursor_action(action: &Action, ctx: &mut Context) {
     if let Some(doc) = ctx.documents.get_mut(doc_id) {
         doc.set_selection(focus_key, new_sel);
     }
+    ensure_cursor_in_view(ctx);
     ctx.request_redraw();
 }
 
@@ -413,6 +459,7 @@ fn handle_selection_action(action: &Action, ctx: &mut Context) {
     if let Some(doc) = ctx.documents.get_mut(doc_id) {
         doc.set_selection(focus_key, new_sel);
     }
+    ensure_cursor_in_view(ctx);
     ctx.request_redraw();
 }
 
@@ -435,6 +482,7 @@ fn handle_editing_action(action: &Action, ctx: &mut Context) {
             if let Some(txn) = crate::editing::delete_backward(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
@@ -442,6 +490,7 @@ fn handle_editing_action(action: &Action, ctx: &mut Context) {
             if let Some(txn) = crate::editing::delete_forward(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
@@ -449,6 +498,7 @@ fn handle_editing_action(action: &Action, ctx: &mut Context) {
             if let Some(txn) = crate::editing::delete_word_backward(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
@@ -456,43 +506,50 @@ fn handle_editing_action(action: &Action, ctx: &mut Context) {
             if let Some(txn) = crate::editing::delete_word_forward(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
         Action::InsertNewline => {
-            let txn = crate::editing::insert_newline(doc, focus_key);
+            let txn = crate::editing::insert_newline(doc, focus_key, ctx.config);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::InsertTab => {
             let txn = crate::editing::insert_tab(doc, focus_key, ctx.config);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::IndentSelection => {
             let txn = crate::editing::indent_lines(doc, focus_key, ctx.config);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::OutdentSelection => {
             let txn = crate::editing::outdent_lines(doc, focus_key, ctx.config);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::DuplicateLine => {
             let txn = crate::editing::duplicate_line(doc, focus_key);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::MoveLineUp => {
             if let Some(txn) = crate::editing::move_line_up(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
@@ -500,40 +557,57 @@ fn handle_editing_action(action: &Action, ctx: &mut Context) {
             if let Some(txn) = crate::editing::move_line_down(doc, focus_key) {
                 if let Some(d) = ctx.documents.get_mut(doc_id) {
                     d.apply(&txn, focus_key);
+                    rehighlight(d, ctx.language_registry);
                 }
             }
         }
         Action::ToggleComment => {
-            // Use "//" as default comment token; can be language-aware later
+            // Use language config for comment token, fallback to hardcoded
             let comment = doc
                 .language
                 .as_ref()
-                .map_or("//", |lang| match lang.as_str() {
-                    "python" | "ruby" | "bash" | "yaml" => "#",
-                    "html" | "xml" => "<!--",
-                    "css" | "scss" => "/*",
-                    "lua" => "--",
-                    _ => "//",
-                });
+                .and_then(|lang| {
+                    ctx.language_registry.get(lang)
+                        .and_then(|entry| entry.config.comment_token.as_deref())
+                })
+                .unwrap_or("//");
             let txn = crate::editing::toggle_comment(doc, focus_key, comment);
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::Cut => {
-            let (txn, _cut_text) = crate::editing::cut_selection(doc, focus_key);
-            // TODO: write _cut_text to system clipboard
+            let (txn, cut_text) = crate::editing::cut_selection(doc, focus_key);
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set_text(&cut_text);
+            }
             if let Some(d) = ctx.documents.get_mut(doc_id) {
                 d.apply(&txn, focus_key);
+                rehighlight(d, ctx.language_registry);
             }
         }
         Action::Copy => {
-            let _copied = crate::editing::copy_selection(doc, focus_key);
-            // TODO: write _copied to system clipboard
+            let copied = crate::editing::copy_selection(doc, focus_key);
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                let _ = cb.set_text(&copied);
+            }
         }
-        // Paste from clipboard is handled via Event::Paste (bracketed paste)
+        Action::Paste => {
+            // Read from system clipboard and insert
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(text) = cb.get_text() {
+                    let txn = crate::editing::insert_text(doc, focus_key, &text);
+                    if let Some(d) = ctx.documents.get_mut(doc_id) {
+                        d.apply(&txn, focus_key);
+                        rehighlight(d, ctx.language_registry);
+                    }
+                }
+            }
+        }
         _ => {}
     }
+    ensure_cursor_in_view(ctx);
     ctx.request_redraw();
 }
 
@@ -552,15 +626,39 @@ fn handle_save(ctx: &mut Context) {
     };
 
     if doc.path.is_none() {
-        // No path — would need Save-As dialog
-        // TODO: push SaveAsPopup onto compositor
         tracing::info!("save: document has no path, needs save-as");
         return;
+    }
+
+    // Format on save
+    let resolved = ctx.config.resolve_for_language(doc.language.as_deref());
+    if resolved.format_on_save {
+        if let Some(ref lang) = doc.language {
+            if let Some(overrides) = ctx.config.languages.get(lang.as_str()) {
+                if let Some(ref formatter_cmd) = overrides.formatter {
+                    let content = doc.text().to_string();
+                    match crate::formatter::format_buffer(&content, formatter_cmd, doc.path.as_deref()) {
+                        Ok(formatted) => {
+                            doc.reload_from_string(&formatted);
+                            rehighlight(doc, ctx.language_registry);
+                            tracing::info!(?doc_id, "formatted before save");
+                        }
+                        Err(e) => {
+                            tracing::warn!(?e, ?doc_id, "formatter failed, saving unformatted");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     match doc.save() {
         Ok(()) => {
             tracing::info!(?doc_id, "document saved");
+            // Delete swap file on clean save
+            if let Some(ref path) = doc.path {
+                crate::swap_file::delete_swap(path);
+            }
         }
         Err(e) => {
             tracing::error!(?e, ?doc_id, "failed to save document");
@@ -641,6 +739,117 @@ fn handle_undo_redo(ctx: &mut Context, is_undo: bool) {
     };
 
     if performed {
+        rehighlight(doc, ctx.language_registry);
         ctx.request_redraw();
+    }
+}
+
+/// Write swap files for all modified documents.
+fn write_swap_files(ctx: &Context) {
+    for (_id, doc) in ctx.documents.iter() {
+        if doc.is_modified() {
+            if let Some(ref path) = doc.path {
+                crate::swap_file::write_swap(path, &doc.text().to_string(), 0);
+            }
+        }
+    }
+}
+
+/// Ensure the cursor is visible in the viewport (both vertical and horizontal scroll).
+fn ensure_cursor_in_view(ctx: &mut Context) {
+    let Some(focus_key) = ctx.view_tree.focus() else { return };
+    let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get(focus_key) else { return };
+    let doc_id = view.doc_id;
+    let Some(doc) = ctx.documents.get(doc_id) else { return };
+
+    let text = doc.text();
+    let head = doc.selection(focus_key).primary().head;
+    let line = if text.len_chars() > 0 {
+        text.char_to_line(head.min(text.len_chars().saturating_sub(1)))
+    } else {
+        0
+    };
+    let col = head.saturating_sub(text.line_to_char(line));
+
+    // Re-borrow mutably to update view
+    if let Some(omni_view::view_tree::Node::Leaf(view)) = ctx.view_tree.get_mut(focus_key) {
+        view.ensure_visible(line);
+        view.ensure_col_visible(col, view.width.saturating_sub(6) as usize); // approximate code width
+    }
+}
+
+/// Re-parse syntax highlighting for a document after an edit.
+fn rehighlight(doc: &mut omni_view::Document, lang_reg: &LanguageRegistry) {
+    let lang_id = match doc.language {
+        Some(ref id) => id.clone(),
+        None => return,
+    };
+    let Some(mut hl) = lang_reg.create_highlighter(&lang_id) else {
+        return;
+    };
+    if let Some((tree, spans)) = hl.parse_full(doc.text()) {
+        doc.syntax = Some(omni_syntax::SyntaxTree::from_tree(tree));
+        doc.highlight_spans = spans;
+    }
+}
+
+/// Handle a file-changed notification from the file watcher.
+fn handle_file_changed(path: &std::path::Path, ctx: &mut Context) {
+    let Some(doc_id) = ctx.documents.find_by_path(path) else {
+        return;
+    };
+    let Some(doc) = ctx.documents.get_mut(doc_id) else {
+        return;
+    };
+
+    // Don't reload if the user has unsaved edits
+    if doc.is_modified() {
+        tracing::info!(?path, "external change detected but document has unsaved edits, skipping reload");
+        return;
+    }
+
+    // Reload the file content
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            doc.reload_from_string(&content);
+            rehighlight(doc, ctx.language_registry);
+            tracing::info!(?path, "reloaded externally changed file");
+            ctx.request_redraw();
+        }
+        Err(e) => {
+            tracing::warn!(?path, ?e, "failed to reload changed file");
+        }
+    }
+}
+
+/// Set up a file watcher that sends changed paths to the channel.
+fn setup_file_watcher(
+    tx: mpsc::UnboundedSender<std::path::PathBuf>,
+) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher, event::ModifyKind};
+
+    let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        if let Ok(event) = res {
+            if matches!(
+                event.kind,
+                notify::EventKind::Modify(ModifyKind::Data(_))
+                    | notify::EventKind::Modify(ModifyKind::Any)
+            ) {
+                for path in event.paths {
+                    let _ = tx.send(path);
+                }
+            }
+        }
+    });
+
+    match watcher {
+        Ok(w) => {
+            tracing::info!("file watcher initialized");
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!(?e, "failed to create file watcher");
+            None
+        }
     }
 }

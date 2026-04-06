@@ -102,8 +102,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 zip = { version = "2", default-features = false, features = ["deflate"] }
 async-trait = "0.1"
 
+# Clipboard
+arboard = "3"
+
+# File watching
+notify = "7"
+
 # VCS
 gix = { version = "0.70", default-features = false, features = ["basic", "status"] }
+similar = "2"
 
 # Filesystem
 ignore = "0.4"

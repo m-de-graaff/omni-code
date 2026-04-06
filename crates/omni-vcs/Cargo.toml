@@ -16,3 +16,4 @@ gix.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 thiserror.workspace = true
 tracing.workspace = true
+similar.workspace = true

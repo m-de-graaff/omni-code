@@ -121,6 +121,13 @@ impl TabBar {
         }
     }
 
+    /// Set the modified indicator for a tab.
+    pub fn set_modified(&mut self, idx: usize, modified: bool) {
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.modified = modified;
+        }
+    }
+
     #[allow(dead_code)]
     pub fn add_tab(&mut self, info: TabInfo) {
         self.tabs.push(info);

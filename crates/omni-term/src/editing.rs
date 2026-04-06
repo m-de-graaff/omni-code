@@ -20,6 +20,18 @@ pub fn insert_char(doc: &Document, view_id: NodeKey, ch: char) -> Transaction {
     let sel = doc.selection(view_id);
     let len = text.len_chars();
 
+    let primary = sel.primary();
+
+    // Skip-over: typing a closing char when it already exists at cursor
+    let skip_chars = [')', '}', ']', '"', '\'', '`'];
+    if primary.is_empty() && skip_chars.contains(&ch) && primary.head < len {
+        if text.char_at(primary.head) == ch {
+            let cs = ChangeSet::identity(len);
+            let new_sel = Selection::point(primary.head + 1);
+            return Transaction::new(cs, new_sel);
+        }
+    }
+
     // Check for auto-closing pair
     let closing = match ch {
         '(' => Some(')'),
@@ -27,10 +39,9 @@ pub fn insert_char(doc: &Document, view_id: NodeKey, ch: char) -> Transaction {
         '[' => Some(']'),
         '"' => Some('"'),
         '\'' => Some('\''),
+        '`' => Some('`'),
         _ => None,
     };
-
-    let primary = sel.primary();
 
     if let Some(close) = closing {
         if primary.is_empty() {
@@ -41,6 +52,15 @@ pub fn insert_char(doc: &Document, view_id: NodeKey, ch: char) -> Transaction {
             let new_sel = Selection::point(pos + 1);
             return Transaction::new(cs, new_sel);
         }
+        // Selection wrapping: wrap selected text with the pair
+        let selected: String = text.slice(primary.start()..primary.end()).chars().collect();
+        let wrapped = format!("{ch}{selected}{close}");
+        let cs = ChangeSet::replace_at(len, primary.start(), primary.len(), &wrapped);
+        let new_sel = Selection::single(Range::new(
+            primary.start() + 1,
+            primary.start() + 1 + selected.chars().count(),
+        ));
+        return Transaction::new(cs, new_sel);
     }
 
     // Simple character insertion (replaces selection if any)
@@ -94,6 +114,21 @@ pub fn delete_backward(doc: &Document, view_id: NodeKey) -> Option<Transaction> 
 
     if primary.head == 0 {
         return None; // at start of document
+    }
+
+    // Delete auto-close pair: if cursor is between a matching pair, delete both
+    if primary.head < len {
+        let before = text.char_at(primary.head - 1);
+        let after = text.char_at(primary.head);
+        let is_pair = matches!(
+            (before, after),
+            ('(', ')') | ('{', '}') | ('[', ']') | ('"', '"') | ('\'', '\'') | ('`', '`')
+        );
+        if is_pair {
+            let cs = ChangeSet::delete_at(len, primary.head - 1, 2);
+            let new_sel = Selection::point(primary.head - 1);
+            return Some(Transaction::new(cs, new_sel));
+        }
     }
 
     let cs = ChangeSet::delete_at(len, primary.head - 1, 1);
@@ -170,38 +205,88 @@ pub fn delete_word_forward(doc: &Document, view_id: NodeKey) -> Option<Transacti
 
 // ── Newline and indentation ───────────��─────────────────────────────
 
-/// Insert a newline with auto-indent (copies leading whitespace from current line).
+/// Insert a newline with smart indent.
+///
+/// - Copies leading whitespace from the current line.
+/// - After `{`, `(`, `[`, `:` → adds an extra indent level.
+/// - Between `{}`, `()`, `[]` → splits braces onto three lines.
 #[must_use]
-pub fn insert_newline(doc: &Document, view_id: NodeKey) -> Transaction {
+pub fn insert_newline(doc: &Document, view_id: NodeKey, config: &EditorConfig) -> Transaction {
     let text = doc.text();
     let sel = doc.selection(view_id);
     let len = text.len_chars();
     let primary = sel.primary();
 
+    let pos = if primary.is_empty() { primary.head } else { primary.start() };
+    let delete_len = if primary.is_empty() { 0 } else { primary.len() };
+
     // Get current line's leading whitespace
-    let line = text.char_to_line(primary.head);
+    let line = text.char_to_line(pos);
     let line_start = text.line_to_char(line);
     let line_len = text.line_len_no_newline(line);
-    let mut indent = String::new();
+    let mut base_indent = String::new();
     for i in 0..line_len {
         let ch = text.char_at(line_start + i);
         if ch == ' ' || ch == '\t' {
-            indent.push(ch);
+            base_indent.push(ch);
         } else {
             break;
         }
     }
 
-    let insert = format!("\n{indent}");
-    let insert_len = insert.chars().count();
+    let extra_indent = if config.use_spaces {
+        " ".repeat(config.tab_width)
+    } else {
+        "\t".to_string()
+    };
 
-    if primary.is_empty() {
-        let cs = ChangeSet::insert_at(len, primary.head, &insert);
-        let new_sel = Selection::point(primary.head + insert_len);
+    // Check char before cursor for block-opening
+    let char_before = if pos > 0 {
+        let mut p = pos - 1;
+        // Skip whitespace to find the meaningful char
+        while p > line_start as usize && text.char_at(p).is_whitespace() && text.char_at(p) != '\n' {
+            p -= 1;
+        }
+        Some(text.char_at(p))
+    } else {
+        None
+    };
+
+    let opens_block = matches!(char_before, Some('{' | '(' | '[' | ':'));
+
+    // Check if cursor is between matching pair (brace splitting)
+    let char_after = if pos < len { Some(text.char_at(pos)) } else { None };
+    let split_pair = opens_block
+        && matches!(
+            (char_before, char_after),
+            (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']'))
+        );
+
+    let (insert, cursor_offset) = if split_pair {
+        // Brace splitting: {\n  cursor\n}
+        let inner = format!("\n{base_indent}{extra_indent}");
+        let close = format!("\n{base_indent}");
+        let cursor_off = inner.chars().count();
+        (format!("{inner}{close}"), cursor_off)
+    } else if opens_block {
+        // Extra indent after block-opening char
+        let insert = format!("\n{base_indent}{extra_indent}");
+        let cursor_off = insert.chars().count();
+        (insert, cursor_off)
+    } else {
+        // Normal newline with same indent
+        let insert = format!("\n{base_indent}");
+        let cursor_off = insert.chars().count();
+        (insert, cursor_off)
+    };
+
+    if delete_len == 0 {
+        let cs = ChangeSet::insert_at(len, pos, &insert);
+        let new_sel = Selection::point(pos + cursor_offset);
         Transaction::new(cs, new_sel)
     } else {
-        let cs = ChangeSet::replace_at(len, primary.start(), primary.len(), &insert);
-        let new_sel = Selection::point(primary.start() + insert_len);
+        let cs = ChangeSet::replace_at(len, primary.start(), delete_len, &insert);
+        let new_sel = Selection::point(primary.start() + cursor_offset);
         Transaction::new(cs, new_sel)
     }
 }
@@ -507,6 +592,52 @@ pub fn copy_selection(doc: &Document, view_id: NodeKey) -> String {
     }
 }
 
+// ── Search & Replace ──────────────────────────────────────────────
+
+/// Replace a single match range `[start, end)` with `replacement`.
+#[must_use]
+pub fn replace_at(doc: &Document, start: usize, end: usize, replacement: &str) -> Transaction {
+    let text = doc.text();
+    let len = text.len_chars();
+    let delete_len = end.saturating_sub(start);
+    let cs = ChangeSet::replace_at(len, start, delete_len, replacement);
+    let new_sel = Selection::point(start + replacement.chars().count());
+    Transaction::new(cs, new_sel)
+}
+
+/// Replace all matches with `replacement`. Matches must be non-overlapping and sorted.
+#[must_use]
+pub fn replace_all_matches(
+    doc: &Document,
+    matches: &[(usize, usize)],
+    replacement: &str,
+) -> Transaction {
+    let text = doc.text();
+    let len = text.len_chars();
+
+    if matches.is_empty() {
+        return Transaction::from_changes(ChangeSet::identity(len));
+    }
+
+    // Build the new text by splicing replacements
+    let mut new_text = String::new();
+    let mut last_end = 0;
+    for &(start, end) in matches {
+        // Append text between last match and this match
+        let between: String = text.slice(last_end..start).chars().collect();
+        new_text.push_str(&between);
+        new_text.push_str(replacement);
+        last_end = end;
+    }
+    // Append remaining text after last match
+    let remaining: String = text.slice(last_end..text.len_chars()).chars().collect();
+    new_text.push_str(&remaining);
+
+    let cs = ChangeSet::replace_at(len, 0, len, &new_text);
+    let new_sel = Selection::point(0);
+    Transaction::new(cs, new_sel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,7 +701,8 @@ mod tests {
         let mut doc = doc;
         doc.set_selection(key, Selection::point(9)); // after "hello"
 
-        let txn = insert_newline(&doc, key);
+        let config = EditorConfig::default();
+        let txn = insert_newline(&doc, key, &config);
         doc.apply(&txn, key);
         assert_eq!(doc.text().to_string(), "    hello\n    ");
     }

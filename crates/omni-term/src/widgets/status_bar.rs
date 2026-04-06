@@ -66,6 +66,8 @@ pub struct StatusBarState {
     pub line_ending: &'static str,
     pub language: String,
     pub branch: String,
+    /// Temporary notification message (shown on the right side).
+    pub message: Option<String>,
 }
 
 impl Default for StatusBarState {
@@ -81,6 +83,7 @@ impl Default for StatusBarState {
             line_ending: if cfg!(windows) { "CRLF" } else { "LF" },
             language: "Rust".into(),
             branch: "main".into(),
+            message: None,
         }
     }
 }
@@ -195,6 +198,14 @@ impl StatusBar {
             self.section_rects.push((section, Rect::new(right_x, area.y, w, 1)));
             right_spans.push(Span::styled(text.to_string(), style));
             right_x += w;
+        }
+
+        // Message notification (replaces right side when present)
+        if let Some(ref msg) = self.state.message {
+            left_spans.push(Span::styled(
+                format!("  {msg}  "),
+                Style::new().fg(theme.text_accent).bg(theme.status_bar_bg),
+            ));
         }
 
         // Combine all spans

@@ -38,6 +38,8 @@ pub struct Document {
     pub file_size: usize,
     /// Cached highlight spans from the last parse (sorted by byte offset).
     pub highlight_spans: Vec<HighlightSpan>,
+    /// Per-line git diff status (empty if not computed).
+    pub diff_status: Vec<omni_vcs::diff::LineDiffStatus>,
 }
 
 impl Document {
@@ -59,6 +61,7 @@ impl Document {
             encoding: encoding_rs::UTF_8,
             file_size: 0,
             highlight_spans: Vec::new(),
+            diff_status: Vec::new(),
         }
     }
 
@@ -83,6 +86,7 @@ impl Document {
             encoding: encoding_rs::UTF_8,
             file_size: 0,
             highlight_spans: Vec::new(),
+            diff_status: Vec::new(),
         }
     }
 
@@ -132,6 +136,18 @@ impl Document {
     #[must_use]
     pub const fn is_large_file(&self, threshold: usize) -> bool {
         self.file_size >= threshold
+    }
+
+    /// Reload the document content from a string (e.g., after external file change).
+    ///
+    /// Replaces the entire text buffer and resets edit state.
+    pub fn reload_from_string(&mut self, content: &str) {
+        self.text = Text::from(content);
+        self.modified = false;
+        self.version += 1;
+        self.selections.clear();
+        self.highlight_spans.clear();
+        self.syntax = None;
     }
 
     // ── Text buffer ─────────────────────────────────────────────────

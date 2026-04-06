@@ -25,6 +25,12 @@ rat-event.workspace = true
 ratatui-interact.workspace = true
 tui-tree-widget.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+arboard.workspace = true
+notify.workspace = true
+omni-vcs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

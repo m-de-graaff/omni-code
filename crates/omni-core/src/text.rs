@@ -377,6 +377,35 @@ impl Text {
         results
     }
 
+    /// Search with a regex pattern. Returns char-index range pairs.
+    ///
+    /// # Errors
+    /// Returns `regex::Error` if the pattern is invalid.
+    pub fn find_all_regex(
+        &self,
+        pattern: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<(usize, usize)>, regex::Error> {
+        let re = regex::RegexBuilder::new(pattern)
+            .case_insensitive(!case_sensitive)
+            .build()?;
+
+        let text_str = self.to_string();
+        let mut results = Vec::new();
+
+        for m in re.find_iter(&text_str) {
+            let start_byte = m.start();
+            let end_byte = m.end();
+            let start_char = self.byte_to_char(start_byte);
+            let end_char = self.byte_to_char(end_byte);
+            if start_char != end_char {
+                results.push((start_char, end_char));
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Search for `needle` in the char range [start..end).
     fn find_in_range(&self, needle: &str, start: usize, end: usize) -> Option<usize> {
         if start >= end || needle.is_empty() {

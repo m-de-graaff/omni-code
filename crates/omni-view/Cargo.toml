@@ -19,3 +19,4 @@ slotmap.workspace = true
 bitflags.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+omni-vcs.workspace = true

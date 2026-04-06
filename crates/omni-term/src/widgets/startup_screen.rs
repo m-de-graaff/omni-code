@@ -15,6 +15,7 @@ pub enum StartupAction {
     NewFile,
     AiChat,
     CommandPalette,
+    OpenRecent(usize),
 }
 
 /// Quick action definition for rendering and hit-testing.
@@ -67,7 +68,11 @@ impl StartupScreen {
     }
 
     /// Render the startup screen centered in the given area.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &ThemeColors) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &ThemeColors, recent_files: &[std::path::PathBuf]) {
+        self.render_inner(frame, area, theme, recent_files);
+    }
+
+    fn render_inner(&mut self, frame: &mut Frame, area: Rect, theme: &ThemeColors, recent_files: &[std::path::PathBuf]) {
         self.action_rects.clear();
 
         let logo = if area.width >= 72 { LOGO } else { LOGO_COMPACT };
@@ -174,6 +179,40 @@ impl StartupScreen {
                     Span::styled(*desc, Style::new().fg(theme.text_muted)),
                 ]);
                 frame.render_widget(Paragraph::new(line), Rect::new(item_x, y, total_w, 1));
+                y += 1;
+            }
+        }
+
+        // -- Recent Files --
+        if !recent_files.is_empty() && y + 2 < area.bottom() {
+            y += 1;
+            let header = Line::from(Span::styled(
+                "Recent Files",
+                Style::new().fg(theme.foreground).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center);
+            frame.render_widget(Paragraph::new(header), Rect::new(area.x, y, area.width, 1));
+            y += 1;
+
+            for (i, path) in recent_files.iter().take(8).enumerate() {
+                if y >= area.bottom() {
+                    break;
+                }
+                let display = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?");
+                let dir = path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let total_w = 50u16;
+                let item_x = center_x.saturating_sub(total_w / 2);
+                let label = format!("  {display}  ({dir})");
+                let style = Style::new().fg(theme.text_muted);
+                let rect = Rect::new(item_x, y, total_w, 1);
+                frame.render_widget(Paragraph::new(Line::from(Span::styled(label, style))), rect);
+                self.action_rects.push((StartupAction::OpenRecent(i), rect));
                 y += 1;
             }
         }
