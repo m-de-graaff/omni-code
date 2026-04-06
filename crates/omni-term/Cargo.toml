@@ -15,9 +15,16 @@ omni-view.workspace = true
 omni-event.workspace = true
 omni-syntax.workspace = true
 omni-loader.workspace = true
+ignore.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tokio = { workspace = true, features = ["full"] }
 color-eyre.workspace = true
 futures-util.workspace = true
+rat-event.workspace = true
+ratatui-interact.workspace = true
+tui-tree-widget.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

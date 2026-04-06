@@ -81,6 +81,21 @@ pub trait Component: Send {
         Ok(EventResult::Ignored)
     }
 
+    /// Handle a global action dispatched through the event bus.
+    ///
+    /// Called by the compositor when an action needs to be routed to layers
+    /// (e.g., `FocusNext`, `ToggleSidebar`).
+    ///
+    /// # Errors
+    /// Returns an error if action handling fails.
+    fn handle_action(
+        &mut self,
+        _action: &omni_event::Action,
+        _ctx: &mut Context,
+    ) -> color_eyre::Result<EventResult> {
+        Ok(EventResult::Ignored)
+    }
+
     /// Handle a paste event (from bracketed paste mode).
     ///
     /// # Errors
@@ -93,7 +108,8 @@ pub trait Component: Send {
     ///
     /// Takes `&mut self` so components can update cached layout state
     /// during rendering (e.g., scroll position adjustments).
-    fn render(&mut self, frame: &mut Frame, area: Rect);
+    /// Takes `&Context` for access to documents, views, and config during render.
+    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Context);
 
     /// Return the cursor position and shape, if this component wants to show one.
     ///

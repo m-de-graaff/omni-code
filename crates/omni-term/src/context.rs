@@ -2,9 +2,13 @@
 
 use tokio::sync::{broadcast, mpsc};
 
+use std::path::PathBuf;
+
+use omni_core::keymap::{Keymap, KeymapMode};
 use omni_event::Action;
-use omni_loader::EditorConfig;
-use omni_view::ViewTree;
+use omni_loader::{EditorConfig, ThemeColors};
+use omni_syntax::LanguageRegistry;
+use omni_view::{DocumentStore, ViewTree};
 
 /// A boxed closure that mutates the compositor.
 ///
@@ -20,8 +24,26 @@ pub struct Context<'a> {
     /// The view tree managing editor splits and focus.
     pub view_tree: &'a mut ViewTree,
 
+    /// All open documents.
+    pub documents: &'a mut DocumentStore,
+
     /// Editor configuration.
     pub config: &'a EditorConfig,
+
+    /// Resolved theme colors for the current terminal.
+    pub theme: &'a ThemeColors,
+
+    /// The active keymap.
+    pub keymap: &'a Keymap,
+
+    /// Current keymap mode.
+    pub keymap_mode: KeymapMode,
+
+    /// Language registry for syntax highlighting.
+    pub language_registry: &'a LanguageRegistry,
+
+    /// The workspace root directory (set on `Action::OpenFolder`).
+    pub workspace_root: Option<PathBuf>,
 
     /// Whether the application should quit after this event cycle.
     pub should_quit: bool,
@@ -38,13 +60,31 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     /// Create a new context.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view_tree: &'a mut ViewTree,
+        documents: &'a mut DocumentStore,
         config: &'a EditorConfig,
+        theme: &'a ThemeColors,
+        keymap: &'a Keymap,
+        language_registry: &'a LanguageRegistry,
         action_tx: broadcast::Sender<Action>,
         callback_tx: mpsc::UnboundedSender<Callback>,
     ) -> Self {
-        Self { view_tree, config, should_quit: false, action_tx, callback_tx, needs_redraw: true }
+        Self {
+            view_tree,
+            documents,
+            config,
+            theme,
+            keymap,
+            keymap_mode: KeymapMode::default(),
+            language_registry,
+            workspace_root: None,
+            should_quit: false,
+            action_tx,
+            callback_tx,
+            needs_redraw: true,
+        }
     }
 
     /// Signal that the application should quit.

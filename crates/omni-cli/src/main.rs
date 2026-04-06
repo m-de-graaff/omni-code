@@ -39,6 +39,11 @@ async fn main() -> color_eyre::Result<()> {
 
     tracing::info!("Omni Code starting...");
 
+    // Ensure Nerd Font is installed (downloads on first run)
+    if let Err(e) = omni_loader::font::ensure_installed().await {
+        tracing::warn!(?e, "Nerd Font auto-install failed — icons may not render correctly");
+    }
+
     // Initialize the event bus
     let bus = omni_event::EventBus::new(256);
     let mut action_rx = bus.subscribe();
@@ -47,19 +52,44 @@ async fn main() -> color_eyre::Result<()> {
     // Callback channel for compositor mutations
     let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // Load configuration
+    // Load configuration and theme
     let config = omni_loader::EditorConfig::default();
+    let theme_def = omni_loader::Theme::by_name(&config.theme);
+    let capability = omni_loader::detect_color_capability();
+    let theme_colors = omni_loader::ThemeColors::from_theme(&theme_def, capability);
+    tracing::info!(theme = %theme_def.name, ?capability, "theme loaded");
+
+    // Load keybindings (defaults + user overrides)
+    let keymap = omni_loader::load_keymap().unwrap_or_else(|err| {
+        tracing::warn!(?err, "failed to load keybindings, using defaults");
+        omni_loader::keymap_loader::default_keymap()
+    });
+    tracing::info!("keybindings loaded");
+
+    // Initialize language registry for syntax highlighting
+    let language_registry = omni_syntax::LanguageRegistry::new();
+    tracing::info!(languages = language_registry.len(), "language registry loaded");
 
     // Initialize editor state
     let mut view_tree = omni_view::ViewTree::new();
+    let mut documents = omni_view::DocumentStore::new();
 
     // Build the application context
-    let mut ctx = omni_term::Context::new(&mut view_tree, &config, action_tx, callback_tx);
+    let mut ctx = omni_term::Context::new(
+        &mut view_tree,
+        &mut documents,
+        &config,
+        &theme_colors,
+        &keymap,
+        &language_registry,
+        action_tx,
+        callback_tx,
+    );
 
     // Set up the terminal and run
     let mut terminal = ratatui::init();
     let mut compositor = omni_term::Compositor::new();
-    compositor.push(Box::new(omni_term::EditorShell::new()))?;
+    compositor.push(Box::new(omni_term::EditorShell::new(theme_colors.clone())))?;
 
     let result = omni_term::event_loop::run(
         &mut terminal,

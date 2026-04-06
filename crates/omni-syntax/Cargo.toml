@@ -12,7 +12,45 @@ workspace = true
 [dependencies]
 omni-core.workspace = true
 tree-sitter.workspace = true
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-toml-ng = { workspace = true, optional = true }
+tree-sitter-md = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-json = { workspace = true, optional = true }
+tree-sitter-css = { workspace = true, optional = true }
+tree-sitter-html = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-bash = { workspace = true, optional = true }
+tree-sitter-yaml = { workspace = true, optional = true }
 serde.workspace = true
 once_cell.workspace = true
 regex.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+
+[features]
+default = [
+    "lang-rust", "lang-toml", "lang-markdown",
+    "lang-python", "lang-javascript", "lang-typescript",
+    "lang-json", "lang-css", "lang-html",
+    "lang-go", "lang-c", "lang-cpp",
+    "lang-bash", "lang-yaml",
+]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-toml = ["dep:tree-sitter-toml-ng"]
+lang-markdown = ["dep:tree-sitter-md"]
+lang-python = ["dep:tree-sitter-python"]
+lang-javascript = ["dep:tree-sitter-javascript"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+lang-json = ["dep:tree-sitter-json"]
+lang-css = ["dep:tree-sitter-css"]
+lang-html = ["dep:tree-sitter-html"]
+lang-go = ["dep:tree-sitter-go"]
+lang-c = ["dep:tree-sitter-c"]
+lang-cpp = ["dep:tree-sitter-cpp"]
+lang-bash = ["dep:tree-sitter-bash"]
+lang-yaml = ["dep:tree-sitter-yaml"]

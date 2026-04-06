@@ -3,7 +3,7 @@
 //! Events propagate front-to-back (topmost popup first).
 //! Rendering goes back-to-front (base layer first, popups on top).
 
-use crossterm::event::{Event, KeyEvent, MouseEvent};
+use crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -103,7 +103,11 @@ impl Compositor {
         ctx: &mut Context,
     ) -> color_eyre::Result<EventResult> {
         let result = match event {
-            Event::Key(key_event) => self.handle_key(*key_event, ctx)?,
+            // Only handle key press events, not release or repeat
+            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                self.handle_key(*key_event, ctx)?
+            }
+            // Key release/repeat events fall through to the wildcard arm
             Event::Mouse(mouse_event) => self.handle_mouse(*mouse_event, ctx)?,
             Event::Paste(text) => self.handle_paste(text, ctx)?,
             Event::Resize(w, h) => {
@@ -123,13 +127,13 @@ impl Compositor {
 
     /// Render all layers back-to-front, then set cursor from the topmost
     /// focused component.
-    pub fn render(&mut self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame, ctx: &Context) {
         let area = frame.area();
         self.area = area;
 
         // Render back-to-front (base layer first)
         for layer in &mut self.layers {
-            layer.render(frame, area);
+            layer.render(frame, area, ctx);
         }
 
         // Cursor from the topmost component that provides one
@@ -164,6 +168,28 @@ impl Compositor {
         for layer in self.layers.iter_mut().rev() {
             let result = layer.handle_mouse(mouse, area, ctx)?;
             if !matches!(result, EventResult::Ignored) {
+                return Ok(result);
+            }
+        }
+        Ok(EventResult::Ignored)
+    }
+
+    /// Dispatch a global action to layers front-to-back.
+    ///
+    /// Used by the event loop to route actions like `FocusNext` or `ToggleSidebar`
+    /// to the appropriate component layer.
+    ///
+    /// # Errors
+    /// Returns an error if a component's action handler fails.
+    pub fn dispatch_action(
+        &mut self,
+        action: &omni_event::Action,
+        ctx: &mut Context,
+    ) -> color_eyre::Result<EventResult> {
+        for layer in self.layers.iter_mut().rev() {
+            let result = layer.handle_action(action, ctx)?;
+            if !matches!(result, EventResult::Ignored) {
+                self.needs_redraw = true;
                 return Ok(result);
             }
         }

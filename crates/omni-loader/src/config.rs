@@ -18,6 +18,10 @@ pub struct EditorConfig {
     pub theme: String,
     /// Tick rate in milliseconds for periodic UI refresh (animations, spinners).
     pub tick_rate_ms: u64,
+    /// File size in bytes above which syntax highlighting is disabled.
+    pub large_file_threshold: usize,
+    /// Auto-save interval in milliseconds. 0 = disabled.
+    pub auto_save_ms: u64,
 }
 
 impl Default for EditorConfig {
@@ -29,6 +33,8 @@ impl Default for EditorConfig {
             word_wrap: false,
             theme: "default".to_string(),
             tick_rate_ms: 100,
+            large_file_threshold: 10_485_760, // 10 MB
+            auto_save_ms: 0,                  // disabled
         }
     }
 }

@@ -13,6 +13,12 @@ impl SyntaxTree {
         Self { tree: None }
     }
 
+    /// Create a syntax tree from a parsed tree-sitter tree.
+    #[must_use]
+    pub const fn from_tree(tree: tree_sitter::Tree) -> Self {
+        Self { tree: Some(tree) }
+    }
+
     /// Return the inner tree-sitter tree, if parsed.
     #[must_use]
     pub const fn tree(&self) -> Option<&tree_sitter::Tree> {

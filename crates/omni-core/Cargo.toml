@@ -10,6 +10,8 @@ description = "Text primitives: rope, selection, transaction, undo history"
 workspace = true
 
 [dependencies]
+bitflags.workspace = true
 ropey.workspace = true
 smallvec.workspace = true
+thiserror.workspace = true
 tracing.workspace = true

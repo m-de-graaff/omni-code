@@ -12,6 +12,10 @@ workspace = true
 [dependencies]
 omni-core.workspace = true
 omni-event.workspace = true
+omni-syntax.workspace = true
+encoding_rs.workspace = true
+tempfile.workspace = true
 slotmap.workspace = true
 bitflags.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
